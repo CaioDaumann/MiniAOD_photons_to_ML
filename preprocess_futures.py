@@ -88,7 +88,11 @@ def is_real(photon: Particle, genparticles) -> bool:
             break
     return matched
 
-
+from math import hypot, pi
+def deltaR(a,b):
+    dphi = abs(a.phi()-b.phi())
+    if dphi < pi: dphi = 2*pi-dphi
+    return hypot(a.eta()-b.eta(),dphi)
 
 
 def did_convert_full(photon: Particle) -> bool:
@@ -281,6 +285,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     """loop through all events and photons per event in a given file, read ECAL recHits and photon attributes."""
     print("INFO: opening file", file.split("/")[-1])
     print('full filename:', file)
+    pfs, pfLabel = Handle("std::vector<pat::PackedCandidate>"), "packedPFCandidates"
     photonHandle, photonLabel = Handle("std::vector<pat::Photon>"), "slimmedPhotons"
     RecHitHandleEB, RecHitLabelEB = Handle("edm::SortedCollection<EcalRecHit,edm::StrictWeakOrdering<EcalRecHit> >"), "reducedEgamma:reducedEBRecHits"
     RecHitHandleEE, RecHitLabelEE = Handle("edm::SortedCollection<EcalRecHit,edm::StrictWeakOrdering<EcalRecHit> >"), "reducedEgamma:reducedEERecHits"
@@ -301,6 +306,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             print(f"\tINFO: processing event {i+1}.")
         # print("\t INFO: processing event", i)
         event.getByLabel(photonLabel, photonHandle)
+        event.getByLabel(pfLabel, pfs)
         event.getByLabel(RecHitLabelEB, RecHitHandleEB)
         event.getByLabel(RecHitLabelEE, RecHitHandleEE)
         if mode!='tagprobe':
@@ -308,7 +314,6 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
         event.getByLabel(rhoLabel, rhoHandle)
         event.getByLabel(triggerLabel, triggerHandle)
         event.getByLabel(pileupLabel, pileupHandle)
-
 
         # # ignore for now
         # if mode == 'tagprobe' and kind == 'data':
@@ -325,6 +330,16 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             # photon_number += 1
             # print('\t\tPhoton number:', photon_number)
             
+            ## Particle flow candidates around the photon
+            # Initialize lists to store PF candidate properties
+            pf_pts, pf_etas, pf_phis, pf_energies = [], [], [], []
+            for ipf,pf in enumerate(pfs.product()):
+                if deltaR(pf,photon) < 15.3:
+                    pf_pts.append( pf.pt() )
+                    pf_etas.append(  pf.eta() )
+                    pf_phis.append( pf.phi() )
+                    pf_energies.append( pf.energy() )
+   
             # dataframe
             seed_id = photon.superCluster().seed().seed()
             seed_id = ROOT.EBDetId(seed_id)  # get crystal indices of photon candidate seed:
@@ -336,6 +351,11 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             if mode=='tagprobe':
                 photonAttributes["hasPixelSeed"] = photon.hasPixelSeed()  # bool
                 photonAttributes["chargedHadronPFPVIso"] = photon.chargedHadronPFPVIso() # float
+            
+            photonAttributes['pf_pts']  = pf_pts
+            photonAttributes['pf_etas'] = pf_etas
+            photonAttributes['pf_phis'] = pf_phis
+            photonAttributes['pf_energies'] = pf_energies
             
             # add event only after preselection
             use_eveto = False if mode=='tagprobe' else True
@@ -386,9 +406,6 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
                 sf = evaluator.evaluate(nTrueInt, "nominal")
                 photonAttributes['nTrueInt'] = nTrueInt
                 photonAttributes['pileup_corr'] = sf
-
-
-
 
             df_event += [photonAttributes]  # list of dicts with the values of the respective photon
             rechits_event += [rechits_array]
@@ -465,11 +482,11 @@ if __name__ == '__main__':
     # high pt problem file:
     # process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/2a3e6842-6a82-4c80-921a-cd7fe86dab59.root')
     # high pt test file:
-    # process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root')
+    process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root')
     # mgg test file:
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/d9c395aa-9eee-426a-944f-9ef41058f2d3.root')
     # zee mc:
-    process_file('/store/mc/Run3Summer22EEMiniAODv4/DYto2L-2Jets_MLL-50_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6_ext2-v2/2820000/62dad405-af8f-4f51-ae23-b5b4619eb570.root')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/DYto2L-2Jets_MLL-50_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6_ext2-v2/2820000/62dad405-af8f-4f51-ae23-b5b4619eb570.root')
     # process_file('zee_testfile.root')
     # zee data:
     # process_file('/store/data/Run2022G/EGamma/MINIAOD/19Dec2023-v1/2560000/44613402-63f2-4bf0-9485-36b3ab13d45f.root')
