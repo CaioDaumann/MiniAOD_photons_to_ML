@@ -89,11 +89,17 @@ def is_real(photon: Particle, genparticles) -> bool:
     return matched
 
 from math import hypot, pi
-def deltaR(a,b):
+def deltaR_(a,b):
     dphi = abs(a.phi()-b.phi())
     if dphi < pi: dphi = 2*pi-dphi
     return hypot(a.eta()-b.eta(),dphi)
 
+def deltaR(photon,pf):
+    dphi = np.abs(photon.phi() - pf.phi())
+    dphi = np.where(dphi > np.pi, 2*np.pi - dphi, dphi)
+    deta = photon.eta() - pf.eta()
+    delta_r = np.hypot(deta, dphi)
+    return delta_r
 
 def did_convert_full(photon: Particle) -> bool:
     """checks if photon converted and both tracks got reconstructed"""
@@ -134,7 +140,16 @@ def get_bdt_run3(photon: Particle) -> float:
     mva = photon.userFloat("PhotonMVAEstimatorRunIIIWinter22v1Values")
     return (mva+1)/2
 
-
+# -> sigmaIetaIeta
+# -> showerShapeVariables [what is this??]
+# -> r2x5 [perhaps this one????]
+# -> hcalPFClusterIso
+# -> full5x5_r1x5
+# -> full5x5_r2x5
+# -> chargedHadronIso
+# -> chargedHadronPFPVIso
+# -> maxDRDEta
+# -> maxDRDPhi
 def get_all(photon: Particle) -> dict[str, Union[int, float, bool]]:
 
     try:
@@ -156,8 +171,12 @@ def get_all(photon: Particle) -> dict[str, Union[int, float, bool]]:
         'eta': photon.eta(),
         'phi': photon.phi(),
         'r9': photon.full5x5_r9(),
+        's4': (photon.full5x5_showerShapeVariables().e2x2/photon.full5x5_showerShapeVariables().e5x5),
+        'eta_width': photon.superCluster().phiWidth(),
+        'phi_width': photon.superCluster().etaWidth(),
+        'sigma_ieie': (photon.full5x5_showerShapeVariables().sigmaIetaIeta),
+        'sigma_ieip': (photon.full5x5_showerShapeVariables().sigmaIetaIphi),
         'HoE': photon.hadronicOverEm(),
-        'sigma_ieie': photon.sigmaEtaEta(),
         'I_ch': photon.chargedHadronIso(),
         'I_gamma': photon.photonIso(),
         'I_n': photon.neutralHadronIso(),
@@ -281,6 +300,84 @@ def tagprobe_matching(df_event: List[dict], rechits_event: list[NDArray]) -> Tup
     rechits_event.pop(tag_idx)  # I only want the rechits of the probe
     return df_event, rechits_event
 
+def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
+    """
+    Selects PF candidates within a deltaR threshold around a photon.
+
+    Parameters:
+    - pfs: Iterable of PF candidates.
+    - photon: The photon object with eta and phi attributes.
+    - dr_threshold: The deltaR threshold for selection.
+
+    Returns:
+    - A dictionary containing selected PF properties.
+    """
+
+    # Precompute photon's eta and phi
+    photon_eta = photon.eta()
+    photon_phi = photon.phi()
+
+    # Extract all necessary PF attributes into separate lists
+    pf_pts = []
+    pf_etas = []
+    pf_phis = []
+    pf_energies = []
+    pf_ID = []
+    pf_fromPV = []
+    pf_mass = []
+    pf_dz = []
+    pf_dxy = []
+
+    # First pass: Extract all attributes
+    for pf in pfs.product():
+        pf_pts.append(pf.pt())
+        pf_etas.append(pf.eta())
+        pf_phis.append(pf.phi())
+        pf_energies.append(pf.energy())
+        pf_ID.append(pf.pdgId())
+        pf_fromPV.append(pf.fromPV())
+        pf_mass.append(pf.mass())
+        pf_dz.append(pf.dz())
+        pf_dxy.append(pf.dxy())
+
+    # Convert lists to NumPy arrays for vectorized operations
+    pf_pts = np.array(pf_pts)
+    pf_etas = np.array(pf_etas)
+    pf_phis = np.array(pf_phis)
+    pf_energies = np.array(pf_energies)
+    pf_ID = np.array(pf_ID)
+    pf_fromPV = np.array(pf_fromPV)
+    pf_mass = np.array(pf_mass)
+    pf_dz = np.array(pf_dz)
+    pf_dxy = np.array(pf_dxy)
+
+    # Compute delta eta and delta phi
+    delta_eta = pf_etas - photon_eta
+    delta_phi = np.abs(pf_phis - photon_phi)
+    # Handle the periodicity of phi
+    delta_phi = np.where(delta_phi > pi, 2*pi - delta_phi, delta_phi)
+
+    # Compute deltaR
+    delta_R = np.sqrt(delta_eta**2 + delta_phi**2)
+
+    # Create a mask for PF candidates within the deltaR threshold
+    mask = delta_R < dr_threshold
+
+    # Apply the mask to select the PF candidates
+    selected_pfs = {
+        'pt': pf_pts[mask],
+        'eta': pf_etas[mask],
+        'phi': pf_phis[mask],
+        'energy': pf_energies[mask],
+        'pdgId': pf_ID[mask],
+        'fromPV': pf_fromPV[mask],
+        'mass': pf_mass[mask],
+        'dz': pf_dz[mask],
+        'dxy': pf_dxy[mask]
+    }
+
+    return selected_pfs
+
 def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray[NDArray[float]]]:
     """loop through all events and photons per event in a given file, read ECAL recHits and photon attributes."""
     print("INFO: opening file", file.split("/")[-1])
@@ -293,6 +390,10 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     rhoHandle, rhoLabel = Handle("std::double"), "fixedGridRhoAll"
     triggerHandle, triggerLabel = Handle("edm::TriggerResults"), ""
     pileupHandle, pileupLabel = Handle("std::vector<PileupSummaryInfo>"), "slimmedAddPileupInfo"
+    
+    # Maybe I can take the genWeight info from here??
+    genInfoHandle, genInfoLabel = Handle("std::vector<GenEventInfoProduct>"), 'generator'
+    
     events = Events(file)
 
     # lists to fill in the eventloop:
@@ -314,7 +415,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
         event.getByLabel(rhoLabel, rhoHandle)
         event.getByLabel(triggerLabel, triggerHandle)
         event.getByLabel(pileupLabel, pileupHandle)
-
+        
         # # ignore for now
         # if mode == 'tagprobe' and kind == 'data':
             # if not matches_trigger(triggerHandle): continue
@@ -325,6 +426,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             genParticles = genParticlesHandle.product()
         photon_number = 0
         for photon in photonHandle.product():
+            
             # only use barrel
             if not get_detector_ID(photon): continue
             # photon_number += 1
@@ -332,14 +434,22 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             
             ## Particle flow candidates around the photon
             # Initialize lists to store PF candidate properties
-            pf_pts, pf_etas, pf_phis, pf_energies = [], [], [], []
+            """
+            pf_pts, pf_etas, pf_phis, pf_energies, pf_mass, pf_ID, pf_dz, pf_fromPV = [], [], [], [], [], [], [], []
             for ipf,pf in enumerate(pfs.product()):
-                if deltaR(pf,photon) < 15.3:
+                if deltaR(pf,photon) < 0.5:
                     pf_pts.append( pf.pt() )
                     pf_etas.append(  pf.eta() )
                     pf_phis.append( pf.phi() )
                     pf_energies.append( pf.energy() )
+                    pf_ID.append( pf.pdgId() )
+                    pf_fromPV.append( pf.fromPV() )
+                    pf_mass.append( pf.mass() )
+                    pf_dz.append( pf.dz() )
    
+            """ 
+            selected_pfs = optimized_pf_selection(pfs, photon)
+            
             # dataframe
             seed_id = photon.superCluster().seed().seed()
             seed_id = ROOT.EBDetId(seed_id)  # get crystal indices of photon candidate seed:
@@ -352,11 +462,16 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
                 photonAttributes["hasPixelSeed"] = photon.hasPixelSeed()  # bool
                 photonAttributes["chargedHadronPFPVIso"] = photon.chargedHadronPFPVIso() # float
             
-            photonAttributes['pf_pts']  = pf_pts
-            photonAttributes['pf_etas'] = pf_etas
-            photonAttributes['pf_phis'] = pf_phis
-            photonAttributes['pf_energies'] = pf_energies
-            
+            photonAttributes['pf_pts']      = selected_pfs["pt"]  #pf_pts
+            photonAttributes['pf_etas']     = selected_pfs["eta"] #pf_etas
+            photonAttributes['pf_phis']     = selected_pfs["phi"]  #pf_phis
+            photonAttributes['pf_energies'] = selected_pfs["energy"]  #pf_energies
+            photonAttributes['pf_ID']       = selected_pfs["pdgId"]  #pf_ID
+            photonAttributes['pf_fromPV']   = selected_pfs["fromPV"]  #pf_fromPV
+            photonAttributes['pf_mass']     = selected_pfs["mass"]  #pf_mass
+            photonAttributes['pf_dz']       = selected_pfs["dz"]  #pf_dz
+            photonAttributes['pf_dxy']       = selected_pfs["dxy"]  #pf_dz
+             
             # add event only after preselection
             use_eveto = False if mode=='tagprobe' else True
             if not get_total_preselection(photonAttributes, use_eveto=use_eveto): continue
@@ -419,9 +534,6 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     rechits = np.array(rechit_list, dtype=np.float32)
     return df, rechits
 
-
-
-
 def determine_datasite(file: Filename) -> str:
     datasite = 'T2_US_Wisconsin'  # high pt, g+jets, postEE
     if 'MGG' in file:  # mgg cut, g+jets, postEE
@@ -449,7 +561,6 @@ def get_save_loc() -> str:
         os.makedirs(savedir + "recHits/")
     return savedir
     
-
 def process_file(file: Filename) -> None:
 
     datasite = determine_datasite(file)  # determine datasite from filename
@@ -479,10 +590,12 @@ def process_file(file: Filename) -> None:
         print('\n\n\n')
 
 if __name__ == '__main__':
+    
     # high pt problem file:
     # process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/2a3e6842-6a82-4c80-921a-cd7fe86dab59.root')
     # high pt test file:
-    process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root')
+    process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/202c9ba5-38c4-41f6-a5b9-4df548fbfa3a.root')
     # mgg test file:
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/d9c395aa-9eee-426a-944f-9ef41058f2d3.root')
     # zee mc:
