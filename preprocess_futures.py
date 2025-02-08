@@ -183,6 +183,11 @@ def get_all(photon: Particle) -> dict[str, Union[int, float, bool]]:
         'I_tr': photon.trackIso(),
         'ecalIso': photon.ecalPFClusterIso(),
         'hcalIso': photon.hcalPFClusterIso(),
+        'chargedHadronWorstVtxIso': photon.chargedHadronWorstVtxIso(),
+        'esEnergyOverRawE': photon.superCluster().preshowerEnergy()/photon.superCluster().rawEnergy(),
+        'trkSumPtHollowConeDR03': photon.trkSumPtHollowConeDR03(),
+        'trkSumPtSolidConeDR04': photon.trkSumPtSolidConeDR04(),
+        'esEffSigmaRR': (photon.full5x5_showerShapeVariables().effSigmaRR),
         # 'real': real,  # this is determined at a later point now
         # 'mc_truth': mc_truth,  # Uncomment if mc_truth is needed despite the comment in the original code
         'bdt2': (photon.userFloat("PhotonMVAEstimatorRunIIFall17v2Values") + 1) / 2,
@@ -392,7 +397,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     pileupHandle, pileupLabel = Handle("std::vector<PileupSummaryInfo>"), "slimmedAddPileupInfo"
     
     # Maybe I can take the genWeight info from here??
-    genInfoHandle, genInfoLabel = Handle("std::vector<GenEventInfoProduct>"), 'generator'
+    genInfoHandle, genInfoLabel = Handle("GenEventInfoProduct"), 'generator'
     
     events = Events(file)
 
@@ -401,6 +406,21 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     rechit_list: List[NDArray] = []  # save data in nested list to convert to DataFrame later
     mode, kind = detect_mode(file)
     for i, event in enumerate(events):
+        
+        # trying to get the genWeight events ...
+        """
+        # Get the generator info from the event.
+        event.getByLabel(genInfoLabel, genInfoHandle)
+        # The product is a vector, but for MiniAOD it should contain one element.
+        genInfo = genInfoHandle.product()
+        # Retrieve the generator weight.
+        print( dir(genInfo) )
+        print( 'weight: ', genInfo.weight() )
+        print( 'weights: ', genInfo.weights() )
+        #print("Generator weight for this event:", genWeight)
+        exit()
+        """
+        
         if i == 0:
             print("\tINFO: file open sucessful, starting Event processing")
         elif i+1 % 10_000 == 0:
@@ -427,6 +447,18 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
         photon_number = 0
         for photon in photonHandle.product():
             
+            ## lets print the fields inside the photon object
+            """
+            print( 50*'==' )
+            print( 'Directories inside the photon....' )
+            names = dir(photon)
+            for name in names:
+                if 'pf' in name or 'Sum' in name or 'Raw' in name or 'RR' in name or 'Charged' in name or 'Vtx' in name or 'Iso' in name or 'PF' in name or 'superCluster' or 'low' in name:
+                    print( name )
+            #print( dir(photon) )
+            exit()
+            """
+            
             # only use barrel
             if not get_detector_ID(photon): continue
             # photon_number += 1
@@ -448,7 +480,6 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
                     pf_dz.append( pf.dz() )
    
             """ 
-            selected_pfs = optimized_pf_selection(pfs, photon)
             
             # dataframe
             seed_id = photon.superCluster().seed().seed()
@@ -461,7 +492,14 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             if mode=='tagprobe':
                 photonAttributes["hasPixelSeed"] = photon.hasPixelSeed()  # bool
                 photonAttributes["chargedHadronPFPVIso"] = photon.chargedHadronPFPVIso() # float
-            
+             
+            # add event only after preselection
+            use_eveto = False if mode=='tagprobe' else True
+            if not get_total_preselection(photonAttributes, use_eveto=use_eveto): continue
+
+            # Lets do this after preselection for a better efficiency
+            selected_pfs = optimized_pf_selection(pfs, photon)
+
             photonAttributes['pf_pts']      = selected_pfs["pt"]  #pf_pts
             photonAttributes['pf_etas']     = selected_pfs["eta"] #pf_etas
             photonAttributes['pf_phis']     = selected_pfs["phi"]  #pf_phis
@@ -470,11 +508,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             photonAttributes['pf_fromPV']   = selected_pfs["fromPV"]  #pf_fromPV
             photonAttributes['pf_mass']     = selected_pfs["mass"]  #pf_mass
             photonAttributes['pf_dz']       = selected_pfs["dz"]  #pf_dz
-            photonAttributes['pf_dxy']       = selected_pfs["dxy"]  #pf_dz
-             
-            # add event only after preselection
-            use_eveto = False if mode=='tagprobe' else True
-            if not get_total_preselection(photonAttributes, use_eveto=use_eveto): continue
+            photonAttributes['pf_dxy']      = selected_pfs["dxy"]  #pf_dz
 
             # determine whether photon is real or fake
             if mode != 'tagprobe':
@@ -495,7 +529,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             if mode=='tagprobe' and kind=='mc':
                 import correctionlib
                 is_correction = True
-                path_to_json = '/home/home1/institut_3a/kappe/work/data/pileup.json.gz'
+                path_to_json = '/net/data_cms3a-1/daumann/HiggsDNA/higgs_dna/systematics/JSONs/pileup/pileup_2022postEE.json.gz'
 
                 year = '2022postEE'
                 if "16" in year:
@@ -532,6 +566,10 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
 
     df = pd.DataFrame(df_list)  # labels are taken from the dicts in data_list
     rechits = np.array(rechit_list, dtype=np.float32)
+    
+    ## lets add the rechits to the dataframes
+    df['rechits'] = list(rechits)
+    
     return df, rechits
 
 def determine_datasite(file: Filename) -> str:
@@ -549,11 +587,11 @@ def determine_datasite(file: Filename) -> str:
         # datasite = 'T2_DE_DESY' 
     return datasite
 
-def get_save_loc() -> str:
+def get_save_loc(savedir) -> str:
     """check the date and create a new directory to save the output"""
-    current_date = date.today()
-    formatted_date = current_date.strftime("%d%B%Y")
-    savedir = f'./output{formatted_date}/'
+    #current_date = date.today()
+    #formatted_date = current_date.strftime("%d%B%Y")
+    #savedir = f'./output{formatted_date}/'
     # in principle there is no need to distinguish between low/high pt when saving
     # they all have different names (I checked)
     if not (os.path.exists(savedir + "recHits/") and  os.path.exists(savedir + "df/")):
@@ -561,18 +599,35 @@ def get_save_loc() -> str:
         os.makedirs(savedir + "recHits/")
     return savedir
     
-def process_file(file: Filename) -> None:
+def process_file(file: Filename, outname) -> None:
 
     datasite = determine_datasite(file)  # determine datasite from filename
     if datasite is not None:
         file = '/store/test/xrootd/' + datasite + file
     file = 'root://xrootd-cms.infn.it/' + file
 
-    try:
-        df, rechits = main(file, rechitdistance=16)
+    #try:
+    df, rechits = main(file, rechitdistance=16)
 
-        # save stuff
-        savedir = get_save_loc()
+    print( 'File processed! , here is the df: ' )
+
+    savedir = get_save_loc(outname) #outname #get_save_loc()
+    outname: str = file.split('/')[-1].split('.')[0]  # name of input file without directory and ending
+    dfname: Filename = savedir + 'df/' + outname + '.pkl'
+    rechitname: str = savedir + 'recHits/' + outname + '.npy'
+
+    df.to_pickle(dfname)
+    print('INFO: photon df file saved as:', dfname)
+
+    np.save(rechitname, rechits)
+    print('INFO: recHits file saved as:', rechitname)
+
+    print('INFO: finished running.')
+
+    # save stuff
+    """ 
+    try:
+        savedir = get_save_loc(outname) #outname #get_save_loc()
         outname: str = file.split('/')[-1].split('.')[0]  # name of input file without directory and ending
         dfname: Filename = savedir + 'df/' + outname + '.pkl'
         rechitname: str = savedir + 'recHits/' + outname + '.npy'
@@ -584,22 +639,24 @@ def process_file(file: Filename) -> None:
         print('INFO: recHits file saved as:', rechitname)
 
         print('INFO: finished running.')
+    
     except:
         print('\n\n\n')
         print('file broke')
         print('\n\n\n')
+    """
 
 if __name__ == '__main__':
-    
+    pass
     # high pt problem file:
     # process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/2a3e6842-6a82-4c80-921a-cd7fe86dab59.root')
     # high pt test file:
-    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root')
-    process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/202c9ba5-38c4-41f6-a5b9-4df548fbfa3a.root')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root', 'test_trash')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/202c9ba5-38c4-41f6-a5b9-4df548fbfa3a.root')
     # mgg test file:
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/d9c395aa-9eee-426a-944f-9ef41058f2d3.root')
     # zee mc:
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/DYto2L-2Jets_MLL-50_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6_ext2-v2/2820000/62dad405-af8f-4f51-ae23-b5b4619eb570.root')
     # process_file('zee_testfile.root')
     # zee data:
-    # process_file('/store/data/Run2022G/EGamma/MINIAOD/19Dec2023-v1/2560000/44613402-63f2-4bf0-9485-36b3ab13d45f.root')
+    #process_file('/store/data/Run2022G/EGamma/MINIAOD/19Dec2023-v1/2560000/44613402-63f2-4bf0-9485-36b3ab13d45f.root', 'outputs/Zee/data/')
