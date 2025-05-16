@@ -1,0 +1,32 @@
+# job.sub
+# -------------------
+
+HostGroup = "LX Cluster/Clients/Batch only" 
+
+Universe                = vanilla
+Executable              = wrapper.sh
+
+# Condor scheduler log (one file for the entire array):
+Log                     = condor_array.log
+
+# Per‐job stdout & stderr:
+Output                  = condor_files/job_$(Process).out
+Error                   = condor_files/job_$(Process).err
+
+# Transfer the wrapper and your password files into each sandbox:
+should_transfer_files   = YES
+transfer_input_files    = wrapper.sh, kerberos_pass.txt, voms_pass.txt
+
+
+when_to_transfer_output = ON_EXIT
+
+# Resources (tune as needed):
+request_cpus            = 1
+request_memory          = 2 GB
+request_disk            = 1 GB
+
+# Pass each line of your config as the single argument $(File):
+arguments               = $(File)
+
+# Queue one job per line in your config:
+queue File from /net/data_cms3a-1/daumann/PhD/ML_reasearch/MiniAOD_photons_to_ML/configs/datafiles_zee_mc.txt

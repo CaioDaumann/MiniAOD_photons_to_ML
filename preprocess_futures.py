@@ -5,6 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 from datetime import date
+import argparse
 
 
 from get_preselection import get_total_preselection
@@ -13,6 +14,7 @@ from typing import List, Tuple, Union
 from numpy.typing import NDArray
 from mytypes import Filename, Particle, Mask
 
+from math import hypot, pi
 
 ROOT.gROOT.SetBatch(True)
 # load FWLite C++ libraries
@@ -20,37 +22,7 @@ ROOT.gSystem.Load("libFWCoreFWLite.so")
 ROOT.gSystem.Load("libDataFormatsFWLite.so")
 ROOT.FWLiteEnabler.enable()
 
-
-def get_pt(photon: Particle) -> float:
-    return photon.pt()
-
-def get_et(photon: Particle) -> float:
-    return photon.et()
-
-def get_eta(photon: Particle) -> float:
-    return photon.eta()
-
-def get_phi(photon: Particle) -> float:
-    return photon.phi()
-
-def get_r9(photon: Particle) -> float:
-    return photon.full5x5_r9()
-
-def get_HoE(photon: Particle) -> float:
-    return photon.hadronicOverEm()
-
-def get_sigma_ieie(photon: Particle) -> float:
-    return photon.sigmaEtaEta()
-
-def get_isolations(photon: Particle) -> Tuple[float, float, float, float]:
-    """I_ch, I_gamma, I_n, I_track"""
-    return photon.chargedHadronIso(), photon.photonIso(), photon.neutralHadronIso(), photon.trackIso()
-
-def get_ecalIso(photon: Particle) -> float:
-    return photon.ecalPFClusterIso()
-
-def get_hcalIso(photon: Particle) -> float:
-    return photon.hcalPFClusterIso()
+from process_specific_functions import Zmmg
 
 def is_real(photon: Particle, genparticles) -> bool:
     """returns True for a real photon and False for a fake
@@ -88,7 +60,6 @@ def is_real(photon: Particle, genparticles) -> bool:
             break
     return matched
 
-from math import hypot, pi
 def deltaR_(a,b):
     dphi = abs(a.phi()-b.phi())
     if dphi < pi: dphi = 2*pi-dphi
@@ -120,26 +91,6 @@ def get_detector_ID(photon: Particle) -> bool:
     '''returns True for Barrel and False for Endcap'''
     return photon.superCluster().seed().seed().subdetId()==1
 
-def pass_eveto(photon: Particle) -> bool:
-    return photon.passElectronVeto()
-
-def get_mc_truth(photon: Particle) -> int:
-    try:
-        pdgId = photon.genParticle().pdgId()
-        return pdgId
-    except ReferenceError:
-        return -1
-
-def get_bdt_run2(photon: Particle) -> float:
-    # mva is range -1 to 1, I use 0 to 1
-    mva = photon.userFloat("PhotonMVAEstimatorRunIIFall17v2Values")
-    return (mva+1)/2
-
-def get_bdt_run3(photon: Particle) -> float:
-    # mva is range -1 to 1, I use 0 to 1
-    mva = photon.userFloat("PhotonMVAEstimatorRunIIIWinter22v1Values")
-    return (mva+1)/2
-
 # -> sigmaIetaIeta
 # -> showerShapeVariables [what is this??]
 # -> r2x5 [perhaps this one????]
@@ -168,6 +119,7 @@ def get_all(photon: Particle) -> dict[str, Union[int, float, bool]]:
     return {
         'pt': photon.pt(),
         'et': photon.et(),
+        'energy': photon.energy(),
         'eta': photon.eta(),
         'phi': photon.phi(),
         'r9': photon.full5x5_r9(),
@@ -259,8 +211,6 @@ def detect_mode(file: Filename) -> Tuple[str, str]:
         kind = None
     return mode, kind
 
-def matches_trigger(triggerhandle) -> bool:
-    pass
 
 def passes_tag_sel(df: dict) -> bool:
     sel = df['pt'] > 40
@@ -273,11 +223,18 @@ def get_zee_mc_mask(df: dict) -> Mask:
     pass
 
 def get_inv_mass(tag: dict, probe: dict) -> float:
-    mass = np.sqrt(2*tag['pt']*probe['pt'] * (
-                    np.cosh(tag['eta']-probe['eta']) 
-                    - np.cos(tag['phi'] - probe['phi'])
+    try:
+        mass = np.sqrt(2*tag['pt']*probe['pt'] * (
+                        np.cosh(tag['eta']-probe['eta']) 
+                        - np.cos(tag['phi'] - probe['phi'])
+                        )
                     )
-                   )
+    except:
+        mass = np.sqrt(2*tag['muon_pt']*probe['muon_pt'] * (
+                        np.cosh(tag['muon_eta']-probe['muon_eta']) 
+                        - np.cos(tag['muon_phi'] - probe['muon_phi'])
+                        )
+                    )
     return mass
 
 def tagprobe_matching(df_event: List[dict], rechits_event: list[NDArray]) -> Tuple[List[dict], List[NDArray]]:
@@ -303,6 +260,8 @@ def tagprobe_matching(df_event: List[dict], rechits_event: list[NDArray]) -> Tup
         # set other pair quantities here
     # rechits_event = [rechits_event[probe_idx]]
     rechits_event.pop(tag_idx)  # I only want the rechits of the probe
+    ## for file size reasons, I will remove the tag from the data frame ...
+    df_event.pop(tag_idx)
     return df_event, rechits_event
 
 def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
@@ -332,9 +291,14 @@ def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
     pf_mass = []
     pf_dz = []
     pf_dxy = []
+    pf_numberOfPixelHits = []
+    pf_hcalFraction = []
+    pf_caloFraction = []
+    pf_pt_track = []
 
     # First pass: Extract all attributes
     for pf in pfs.product():
+        
         pf_pts.append(pf.pt())
         pf_etas.append(pf.eta())
         pf_phis.append(pf.phi())
@@ -344,6 +308,10 @@ def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
         pf_mass.append(pf.mass())
         pf_dz.append(pf.dz())
         pf_dxy.append(pf.dxy())
+        pf_pt_track.append(pf.ptTrk())
+        pf_numberOfPixelHits.append(pf.numberOfPixelHits())
+        pf_hcalFraction.append(pf.hcalFraction())
+        pf_caloFraction.append(pf.caloFraction())
 
     # Convert lists to NumPy arrays for vectorized operations
     pf_pts = np.array(pf_pts)
@@ -355,10 +323,15 @@ def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
     pf_mass = np.array(pf_mass)
     pf_dz = np.array(pf_dz)
     pf_dxy = np.array(pf_dxy)
+    pf_pt_track = np.array(pf_pt_track)
+    pf_numberOfPixelHits = np.array(pf_numberOfPixelHits)
+    pf_hcalFraction = np.array(pf_hcalFraction)
+    pf_caloFraction = np.array(pf_caloFraction)
 
     # Compute delta eta and delta phi
     delta_eta = pf_etas - photon_eta
     delta_phi = np.abs(pf_phis - photon_phi)
+    
     # Handle the periodicity of phi
     delta_phi = np.where(delta_phi > pi, 2*pi - delta_phi, delta_phi)
 
@@ -378,17 +351,22 @@ def optimized_pf_selection(pfs, photon, dr_threshold=0.5):
         'fromPV': pf_fromPV[mask],
         'mass': pf_mass[mask],
         'dz': pf_dz[mask],
-        'dxy': pf_dxy[mask]
+        'dxy': pf_dxy[mask],
+        'ptTrk': pf_pt_track[mask],
+        'numberOfPixelHits': pf_numberOfPixelHits[mask],
+        'hcalFraction': pf_hcalFraction[mask],
+        'ecalFraction': pf_caloFraction[mask]
     }
 
     return selected_pfs
 
-def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray[NDArray[float]]]:
+def main(file: Filename, mode = None, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray[NDArray[float]]]:
     """loop through all events and photons per event in a given file, read ECAL recHits and photon attributes."""
     print("INFO: opening file", file.split("/")[-1])
     print('full filename:', file)
     pfs, pfLabel = Handle("std::vector<pat::PackedCandidate>"), "packedPFCandidates"
     photonHandle, photonLabel = Handle("std::vector<pat::Photon>"), "slimmedPhotons"
+    muonHandle, muonLabel = Handle("std::vector<pat::Muon>"), "slimmedMuons"
     RecHitHandleEB, RecHitLabelEB = Handle("edm::SortedCollection<EcalRecHit,edm::StrictWeakOrdering<EcalRecHit> >"), "reducedEgamma:reducedEBRecHits"
     RecHitHandleEE, RecHitLabelEE = Handle("edm::SortedCollection<EcalRecHit,edm::StrictWeakOrdering<EcalRecHit> >"), "reducedEgamma:reducedEERecHits"
     genParticlesHandle, genParticlesLabel = Handle("std::vector<reco::GenParticle>"), "prunedGenParticles"
@@ -404,22 +382,10 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     # lists to fill in the eventloop:
     df_list: List[dict] = []  # save data in nested list to convert to DataFrame later
     rechit_list: List[NDArray] = []  # save data in nested list to convert to DataFrame later
-    mode, kind = detect_mode(file)
+    mode_, kind = detect_mode(file)
+    print( 'Mode being considered: ', mode )
+    
     for i, event in enumerate(events):
-        
-        # trying to get the genWeight events ...
-        """
-        # Get the generator info from the event.
-        event.getByLabel(genInfoLabel, genInfoHandle)
-        # The product is a vector, but for MiniAOD it should contain one element.
-        genInfo = genInfoHandle.product()
-        # Retrieve the generator weight.
-        print( dir(genInfo) )
-        print( 'weight: ', genInfo.weight() )
-        print( 'weights: ', genInfo.weights() )
-        #print("Generator weight for this event:", genWeight)
-        exit()
-        """
         
         if i == 0:
             print("\tINFO: file open sucessful, starting Event processing")
@@ -427,6 +393,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             print(f"\tINFO: processing event {i+1}.")
         # print("\t INFO: processing event", i)
         event.getByLabel(photonLabel, photonHandle)
+        event.getByLabel(muonLabel, muonHandle)
         event.getByLabel(pfLabel, pfs)
         event.getByLabel(RecHitLabelEB, RecHitHandleEB)
         event.getByLabel(RecHitLabelEE, RecHitHandleEE)
@@ -436,9 +403,54 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
         event.getByLabel(triggerLabel, triggerHandle)
         event.getByLabel(pileupLabel, pileupHandle)
         
-        # # ignore for now
-        # if mode == 'tagprobe' and kind == 'data':
-            # if not matches_trigger(triggerHandle): continue
+        # for quick debugging!!! remove this!!!!!!
+        if i > 200: 
+            break
+        
+        if mode == 'Zmmg':
+        
+            ## matching the Zmmg triggers ...
+            if Zmmg.matches_trigger(event):
+                pass
+            else:
+                continue
+
+            ### lets require at least two muons in the event ...
+            n_muon_event = 0
+            df_event_muons: List[dict] = []
+            for muon in muonHandle.product():
+                muon_att = Zmmg.get_muon_atributes(muon)
+                if muon.pt() > 10 and muon_att['muon_IsTight']:
+                    df_event_muons += [Zmmg.get_muon_atributes(muon)] 
+                    n_muon_event += 1
+            
+            if n_muon_event < 2:
+                continue
+            
+            # Sort the list of muons by 'muon_pt' descending - I dont think this should be here .... Why there are many muons in the data event?
+            df_event_muons = sorted(df_event_muons, key=lambda x: x["muon_pt"], reverse=True)
+
+            # Pick only the top 2
+            df_event_muons = df_event_muons[:2]
+            
+            # very basic Zmmg requires two muons, oposite charges and muu > 35 ...
+            #print( 'Does it pass triggers and basic Zmm selection? - ', Zmmg_matching(df_event_muons) )
+            if Zmmg.Zmmg_matching(df_event_muons):
+                pass
+            else:
+                continue
+        
+        elif mode=='tagprobe':
+            pass
+            # # ignore for now
+            # if mode == 'tagprobe' and kind == 'data':
+                # if not matches_trigger(triggerHandle): continue
+            #print( 'Does the event matches the trigger? - ', matches_trigger(event) )
+        elif mode == 'GJet':
+            pass
+        else:
+            print( f'Process {mode} not implemented! Chosse a valid one! [Zmmg, tagprobe or GJet]. Exiting ...' )
+            exit()
 
         df_event: List[dict] = []
         rechits_event: List[NDArray] = []
@@ -447,45 +459,26 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
         photon_number = 0
         for photon in photonHandle.product():
             
-            ## lets print the fields inside the photon object
-            """
-            print( 50*'==' )
-            print( 'Directories inside the photon....' )
-            names = dir(photon)
-            for name in names:
-                if 'pf' in name or 'Sum' in name or 'Raw' in name or 'RR' in name or 'Charged' in name or 'Vtx' in name or 'Iso' in name or 'PF' in name or 'superCluster' or 'low' in name:
-                    print( name )
-            #print( dir(photon) )
-            exit()
-            """
-            
             # only use barrel
             if not get_detector_ID(photon): continue
-            # photon_number += 1
-            # print('\t\tPhoton number:', photon_number)
-            
-            ## Particle flow candidates around the photon
-            # Initialize lists to store PF candidate properties
-            """
-            pf_pts, pf_etas, pf_phis, pf_energies, pf_mass, pf_ID, pf_dz, pf_fromPV = [], [], [], [], [], [], [], []
-            for ipf,pf in enumerate(pfs.product()):
-                if deltaR(pf,photon) < 0.5:
-                    pf_pts.append( pf.pt() )
-                    pf_etas.append(  pf.eta() )
-                    pf_phis.append( pf.phi() )
-                    pf_energies.append( pf.energy() )
-                    pf_ID.append( pf.pdgId() )
-                    pf_fromPV.append( pf.fromPV() )
-                    pf_mass.append( pf.mass() )
-                    pf_dz.append( pf.dz() )
-   
-            """ 
+            #photon_number += 1
+            #print('\t\tPhoton number:', photon_number)
             
             # dataframe
             seed_id = photon.superCluster().seed().seed()
             seed_id = ROOT.EBDetId(seed_id)  # get crystal indices of photon candidate seed:
 
             photonAttributes = get_all(photon)
+            
+            ### more on the Zmmg selection
+            if mode == 'Zmmg':
+                if Zmmg.Zmmg_plus_photon_selection(photonAttributes, df_event_muons):
+                    pass
+                else:
+                    continue
+            
+            #print( 'Photon passed the selection!\n' )
+            
             photonAttributes["rho"] = rhoHandle.product()[0]
             photonAttributes["seed_ieta"] = seed_id.ieta()
             photonAttributes["seed_iphi"] = seed_id.iphi()
@@ -495,8 +488,9 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
              
             # add event only after preselection
             use_eveto = False if mode=='tagprobe' else True
+            #print( 'Passed selection: ', get_total_preselection(photonAttributes, use_eveto=use_eveto) )
             if not get_total_preselection(photonAttributes, use_eveto=use_eveto): continue
-
+            
             # Lets do this after preselection for a better efficiency
             selected_pfs = optimized_pf_selection(pfs, photon)
 
@@ -509,6 +503,10 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             photonAttributes['pf_mass']     = selected_pfs["mass"]  #pf_mass
             photonAttributes['pf_dz']       = selected_pfs["dz"]  #pf_dz
             photonAttributes['pf_dxy']      = selected_pfs["dxy"]  #pf_dz
+            photonAttributes['pf_pt_track'] = selected_pfs["ptTrk"]  #pf_dzError
+            photonAttributes['pf_numberOfPixelHits'] = selected_pfs["numberOfPixelHits"]  #pf_dzError
+            photonAttributes['pf_hcalFraction'] = selected_pfs["hcalFraction"]  #pf_dzError
+            photonAttributes['pf_caloFraction'] = selected_pfs["ecalFraction"]  #pf_dzError
 
             # determine whether photon is real or fake
             if mode != 'tagprobe':
@@ -560,6 +558,7 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
             rechits_event += [rechits_array]
         if mode=='tagprobe':
             df_event, rechits_event = tagprobe_matching(df_event, rechits_event)
+        
         df_list += df_event
         rechit_list += rechits_event
     print('INFO: all events processed')
@@ -573,9 +572,10 @@ def main(file: Filename, rechitdistance: int = 5) -> Tuple[pd.DataFrame, NDArray
     return df, rechits
 
 def determine_datasite(file: Filename) -> str:
-    datasite = 'T2_US_Wisconsin'  # high pt, g+jets, postEE
-    if 'MGG' in file:  # mgg cut, g+jets, postEE
-        datasite = 'T2_US_Caltech'  
+    datasite = None #'T2_US_Wisconsin'  # high pt, g+jets, postEE
+    if 'MGG2555' in file:  # mgg cut, g+jets, postEE
+        datasite = 'T1_US_FNAL_Disk'  
+        #datasite = 'T2_US_Caltech'  
     elif '10to40' in file:  # low pt, g+jets, postEE
         datasite = 'T1_US_FNAL_Disk'  
     elif 'EGamma' in file:  # Zee data
@@ -595,68 +595,60 @@ def get_save_loc(savedir) -> str:
     # in principle there is no need to distinguish between low/high pt when saving
     # they all have different names (I checked)
     if not (os.path.exists(savedir + "recHits/") and  os.path.exists(savedir + "df/")):
-        os.makedirs(savedir + "df/")
-        os.makedirs(savedir + "recHits/")
+        os.makedirs(savedir + "df/", exist_ok=True)
+        os.makedirs(savedir + "recHits/", exist_ok=True)
     return savedir
     
-def process_file(file: Filename, outname) -> None:
+def process_file(file: Filename, mode, outname) -> None:
 
     datasite = determine_datasite(file)  # determine datasite from filename
     if datasite is not None:
         file = '/store/test/xrootd/' + datasite + file
     file = 'root://xrootd-cms.infn.it/' + file
 
-    #try:
-    df, rechits = main(file, rechitdistance=16)
+    df, rechits = main(file, mode, rechitdistance=16)
 
     print( 'File processed! , here is the df: ' )
 
     savedir = get_save_loc(outname) #outname #get_save_loc()
     outname: str = file.split('/')[-1].split('.')[0]  # name of input file without directory and ending
     dfname: Filename = savedir + 'df/' + outname + '.pkl'
-    rechitname: str = savedir + 'recHits/' + outname + '.npy'
+    # Lets not save the rechits to save some space, lets save everything as a dataframe
+    #rechitname: str = savedir + 'recHits/' + outname + '.npy'
 
     df.to_pickle(dfname)
     print('INFO: photon df file saved as:', dfname)
 
-    np.save(rechitname, rechits)
-    print('INFO: recHits file saved as:', rechitname)
+    # Lets not save rechits anymore, since now they are already inside the Data frames ...
+    #np.save(rechitname, rechits)
+    #print('INFO: recHits file saved as:', rechitname)
 
     print('INFO: finished running.')
 
-    # save stuff
-    """ 
-    try:
-        savedir = get_save_loc(outname) #outname #get_save_loc()
-        outname: str = file.split('/')[-1].split('.')[0]  # name of input file without directory and ending
-        dfname: Filename = savedir + 'df/' + outname + '.pkl'
-        rechitname: str = savedir + 'recHits/' + outname + '.npy'
-
-        df.to_pickle(dfname)
-        print('INFO: photon df file saved as:', dfname)
-
-        np.save(rechitname, rechits)
-        print('INFO: recHits file saved as:', rechitname)
-
-        print('INFO: finished running.')
-    
-    except:
-        print('\n\n\n')
-        print('file broke')
-        print('\n\n\n')
-    """
-
 if __name__ == '__main__':
-    pass
+    
+    parser = argparse.ArgumentParser(description='manage condor submission preprocess_futures', prog='preprocess_futures.py')
+    parser.add_argument('--file'      , help='file containing the names of the dataset files')
+    parser.add_argument('--outfile'   , help='path to output the DFs and RecHits file')
+    parser.add_argument('--mode'      , help='Physics process being considered [Zmmg, tagandprobe, GJet]') 
+    
+    args = parser.parse_args()
+    
+    process_file(args.file, mode = args.mode, outname = args.outfile)
+    
+    # 'test_condor_zee/'
+    #pass
     # high pt problem file:
     # process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/2a3e6842-6a82-4c80-921a-cd7fe86dab59.root')
     # high pt test file:
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/30000/cb93eb36-cefb-4aea-97aa-fcf8cd72245f.root', 'test_trash')
     #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/202c9ba5-38c4-41f6-a5b9-4df548fbfa3a.root')
     # mgg test file:
-    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/d9c395aa-9eee-426a-944f-9ef41058f2d3.root')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GJet_PT-40_DoubleEMEnriched_MGG-80_TuneCP5_13p6TeV_pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/50000/d9c395aa-9eee-426a-944f-9ef41058f2d3.root', mode = 'GJet' , outname = 'sample_with_no_DR_cut/')
     # zee mc:
-    #process_file('/store/mc/Run3Summer22EEMiniAODv4/DYto2L-2Jets_MLL-50_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6_ext2-v2/2820000/62dad405-af8f-4f51-ae23-b5b4619eb570.root')
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/DYto2L-2Jets_MLL-50_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6_ext2-v2/2820000/62dad405-af8f-4f51-ae23-b5b4619eb570.root', mode = 'tagprobe', outname = 'test_trash_zmmg/')
     # process_file('zee_testfile.root')
     # zee data:
-    #process_file('/store/data/Run2022G/EGamma/MINIAOD/19Dec2023-v1/2560000/44613402-63f2-4bf0-9485-36b3ab13d45f.root', 'outputs/Zee/data/')
+    #process_file('/store/data/Run2022G/EGamma/MINIAOD/19Dec2023-v1/2560000/44613402-63f2-4bf0-9485-36b3ab13d45f.root',  mode = 'tagprobe',outname =  'outputs/Zmmg_2/')
+    # diphoton data:
+    #process_file('/store/mc/Run3Summer22EEMiniAODv4/GG-Box-3Jets_MGG-80_13p6TeV_sherpa/MINIAODSIM/130X_mcRun3_2022_realistic_postEE_v6-v2/40000/07fcfb2b-953d-4d79-a09d-a6d3b22cd1a6.root', 'test_trash')
